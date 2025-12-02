@@ -1,12 +1,5 @@
 # py-data-medical-embeddings
 
-Pinecone
-pcsk_3ervVL_RZWUrcV1m9gCU3M88n9maAj5R4hsACaH9ojfXxRYNW6W9ojnJrwzsNKvPo2N1G6
-
-API-Key
-healthcare-development
-pcsk_5rpHZv_LeQCoVjy2CiLPK1jivU2kUoQPmYewByVorxiKZL8AR78mKBAREZtvvx5uXVHy2E
-
 **Objetivo**
 
 Criar uma base vetorial no Pinecone a partir de arquivos CSV envolve algumas etapas essenciais: configuração, leitura de dados, geração de embeddings e o upsert (inserção) no índice.
