@@ -20,7 +20,7 @@ DIMENSION = 1536
 MODEL_NAME = "text-embedding-3-small"
 
 # Nome do arquivo de entrada
-INPUT_FILE = "fleury-db.csv"
+INPUT_FILE = "loinc-processed-ptBR.csv"
 
 # Inicialização dos clientes
 # Inicialização do Cliente OpenAI
@@ -96,22 +96,22 @@ def ingest_data_to_pinecone():
     # ASSUNÇÃO: Seus arquivos têm colunas como 'ID_PROCEDIMENTO', 'DESCRICAO', 'METODO', 'TIPO_COLETA'
     
 # --- ATENÇÃO: AJUSTE OS NOMES DAS COLUNAS CONFORME SEU CSV FINAL ---
-    ID_COLUMN = 'id'
-    DESC_COLUMN = 'name'
-    METHOD_COLUMN = 'analytical_method'
-    COLECTION_COLUMN = 'specimen_type'
-    SYNONYMS_COLUMN = 'synonyms' # Nova coluna
-    SEARCHABLE_TERMS_COLUMN = 'searchable_terms' # Nova coluna
+    ID_COLUMN = 'LOINC_NUM'
+    DESC_COLUMN = 'COMPONENT'
+    #METHOD_COLUMN = ''
+    COLECTION_COLUMN = 'SYSTEM'
+    SYNONYMS_COLUMN = 'RELATEDNAMES2' # Nova coluna
+    #SEARCHABLE_TERMS_COLUMN = 'searchable_terms' # Nova coluna
     
     # ------------------------------------------------------------------
 
     # Preenche colunas ausentes ou vazias com strings vazias para evitar erros
     # Nota: O método .get() é seguro para colunas que podem não existir no DF.
     df[DESC_COLUMN] = df.get(DESC_COLUMN, pd.Series([''] * len(df))).fillna('')
-    df[METHOD_COLUMN] = df.get(METHOD_COLUMN, pd.Series([''] * len(df))).fillna('')
+    #df[METHOD_COLUMN] = df.get(METHOD_COLUMN, pd.Series([''] * len(df))).fillna('')
     df[COLECTION_COLUMN] = df.get(COLECTION_COLUMN, pd.Series([''] * len(df))).fillna('')
     df[SYNONYMS_COLUMN] = df.get(SYNONYMS_COLUMN, pd.Series([''] * len(df))).fillna('')
-    df[SEARCHABLE_TERMS_COLUMN] = df.get(SEARCHABLE_TERMS_COLUMN, pd.Series([''] * len(df))).fillna('')
+    #df[SEARCHABLE_TERMS_COLUMN] = df.get(SEARCHABLE_TERMS_COLUMN, pd.Series([''] * len(df))).fillna('')
     
     # --- LÓGICA DE ADAPTAÇÃO ---
     
@@ -121,12 +121,16 @@ def ingest_data_to_pinecone():
     )
     
     # 2. Constrói a String de Contexto RICA para o Embedding
+    #df['TEXT_TO_EMBED'] = (
+    #    df[DESC_COLUMN] + " MÉTODO: " + df[METHOD_COLUMN].apply(lambda x: 'UNKNOWN' if x.strip() == '' else x) + 
+    #    " COLETA: " + df[COLECTION_COLUMN].apply(lambda x: 'UNKNOWN' if x.strip() == '' else x) +
+    #    ". SINÔNIMOS: " + df[SYNONYMS_COLUMN] +
+    #    ". TERMOS DE BUSCA: " + df[SEARCHABLE_TERMS_COLUMN]
+    #)
     df['TEXT_TO_EMBED'] = (
-        df[DESC_COLUMN] + " MÉTODO: " + df[METHOD_COLUMN].apply(lambda x: 'UNKNOWN' if x.strip() == '' else x) + 
-        " COLETA: " + df[COLECTION_COLUMN].apply(lambda x: 'UNKNOWN' if x.strip() == '' else x) +
-        ". SINÔNIMOS: " + df[SYNONYMS_COLUMN] +
-        ". TERMOS DE BUSCA: " + df[SEARCHABLE_TERMS_COLUMN]
-    )
+        df[DESC_COLUMN] + " COLETA: " + df[COLECTION_COLUMN].apply(lambda x: 'UNKNOWN' if x.strip() == '' else x) +
+        ". SINONIMOS: " + df[SYNONYMS_COLUMN]
+    )    
     
     # --- FIM DA LÓGICA DE ADAPTAÇÃO ---
     
@@ -146,12 +150,14 @@ def ingest_data_to_pinecone():
         # Salvamos todas as colunas de dados do procedimento (TUSS, LOINC, Descrição)
         # exceto a que usamos para gerar o texto, que pode ser descartada.
         metadata_columns = [col for col in df.columns if col not in ['TEXT_TO_EMBED']]
+        print(metadata_columns)
         
         # Cria a lista de dicionários de metadados
         metadatas = batch[metadata_columns].to_dict('records')
 
         # 3. Preparar o payload para o upsert (ID, Vetor, Metadado)
         to_upsert = list(zip(ids, vectors, metadatas))
+        print(to_upsert)
         
         # 4. Upsert
         index.upsert(vectors=to_upsert)
