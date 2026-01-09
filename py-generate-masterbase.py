@@ -115,10 +115,22 @@ def preparar_string_para_embedding(componente: str, sistema: str, propriedade: s
     return ", ".join(partes_essenciais)
 
 def normalizar_para_hash(texto: str) -> str:
-    """Remove acentos e converte para minusculo."""
+    """
+    Remove acentos e converte para minusculo.
+    Também normaliza quebras de linha e outros caracteres de espaçamento.
+    """
     if not texto: return ""
-    norm = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('ASCII')
-    return norm.lower().strip()
+    
+    # Primeiro, substitui quebras de linha e tabs por espaços
+    texto = re.sub(r'[\n\r\t]+', ' ', str(texto))
+    
+    # Remove acentos
+    norm = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
+    
+    # Normaliza espaços múltiplos para um único espaço
+    texto_limpo = re.sub(r'\s+', ' ', norm)
+    
+    return texto_limpo.lower().strip()
 
 def gerar_hash_master(componente: str, sistema: str, propriedade: str) -> str:
     """
@@ -204,9 +216,11 @@ def criar_base_mestra_inicial(caminho_arquivo: str) -> pd.DataFrame:
         if componente in cache_componentes:
             continue
         
-        # Processamento normal para componentes novos        
-        propriedade = row['SISTEMA']
-        sistema = row['UNIDADE DE MEDIDA']
+        # Processamento normal para componentes novos
+        # IMPORTANTE: SISTEMA contém o material (Sangue, Urina, etc)
+        # UNIDADE DE MEDIDA contém a propriedade/unidade (mg/dL, U/L, etc)
+        sistema = row['SISTEMA']  # Material de coleta -> LOINC_SYSTEM
+        propriedade = row['UNIDADE DE MEDIDA']  # Unidade -> LOINC_PROPERTY
         sinonimos = row['SINONIMOS']
         
         # 1. Geração da Master Key (MK)

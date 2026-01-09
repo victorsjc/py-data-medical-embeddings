@@ -11,9 +11,9 @@ from typing import List, Dict, Any, Tuple
 # ==============================================================================
 
 # Arquivos de Entrada/Saída
-#CAMINHO_JSON = 'unimed-exame-medico-casue.pdf_20251213_021301_codified.json'
+CAMINHO_JSON = 'unimed-exame-medico-casue.pdf_20251213_021301_codified.json'
 #CAMINHO_JSON = '7508836_66269.31244.843496.50316204.pdf_20251209_023139_codified.json'
-CAMINHO_JSON = 'exames_drajuliapitombo_anacarolina_codified.json'
+#CAMINHO_JSON = 'exames_drajuliapitombo_anacarolina_codified.json'
 CAMINHO_BASE_MESTRA = 'base_mestra_loinc_inicial.csv' # Arquivo com os Hashs mestres
 
 # Simulação dos tempos de processamento
@@ -21,8 +21,9 @@ TEMPO_CACHE_HIT_MS = 5      # Via Rápida (Acerto Determinístico)
 TEMPO_PINE_CONE_MISS_MS = 350 # Via Lenta (Consulta Vetorial)
 
 # Dicionário que simula a tabela de Cache/Base Mestra em memória
-CACHE_PRODUCAO_HASH_MK: Dict[str, str] = {} 
-CACHE_SINONIMOS_HASH_MK: Dict[str, str] = {}
+# Estrutura: hash -> (master_key_id, set_of_valid_materials)
+CACHE_PRODUCAO_HASH_MK: Dict[str, Tuple[str, set]] = {} 
+CACHE_SINONIMOS_HASH_MK: Dict[str, Tuple[str, set]] = {}
 
 # Log detalhado de cada exame processado
 LOG_EXAMES_DETALHADO: List[Dict[str, Any]] = []
@@ -31,11 +32,66 @@ LOG_EXAMES_DETALHADO: List[Dict[str, Any]] = []
 # 1. FUNÇÕES DE CARREGAMENTO E HASH
 # ==============================================================================
 
-def carregar_base_mestra_cache() -> Tuple[Dict[str, str], Dict[str, str]]:
+def normalizar_material(material: str) -> str:
+    """
+    Normaliza o nome do material para garantir consistência na comparação.
+    Converte para minúsculas e remove espaços extras.
+    """
+    if not material:
+        return ""
+    
+    # Normaliza e remove espaços
+    material_norm = material.lower().strip()
+    
+    # Mapeamento de sinônimos comuns
+    sinonimos_material = {
+        'sangue total citratado': 'sangue',
+        'sangue edta': 'sangue',
+        'blood': 'sangue',
+        'serum': 'soro',
+        'plasma': 'plasma',
+        'urine': 'urina',
+        'swab': 'swab',
+        'saliva': 'saliva',
+        "fezes": "fezes",
+    }
+    
+    return sinonimos_material.get(material_norm, material_norm)
+
+def materiais_compativeis(material_exame: str, loinc_system: str) -> bool:
+    """
+    Verifica se o material do exame é compatível com os materiais suportados
+    pela Master Key (LOINC_SYSTEM).
+    
+    Args:
+        material_exame: Material do exame a ser verificado
+        loinc_system: String com materiais válidos separados por vírgula (ex: "Sangue,Soro,Plasma")
+    
+    Returns:
+        True se o material do exame está na lista de materiais suportados
+    """
+    if not material_exame or not loinc_system:
+        # Se algum estiver vazio, considera compatível (fallback)
+        return True
+    
+    # Normaliza o material do exame
+    material_norm = normalizar_material(material_exame)
+    
+    # Parse da lista de materiais suportados
+    materiais_validos = [normalizar_material(m.strip()) for m in loinc_system.split(',')]
+    
+    # Verifica se o material do exame está na lista
+    return material_norm in materiais_validos
+
+def carregar_base_mestra_cache() -> Tuple[Dict[str, Tuple[str, set]], Dict[str, Tuple[str, set]]]:
     """
     Carrega a base mestra do LOINC e popula o dicionário de cache.
-    Usa HASH_CACHE como chave e MASTER_KEY_ID como valor.
+    Usa HASH_CACHE como chave e (MASTER_KEY_ID, set_of_materials) como valor.
     Tambem popula o CACHE_SINONIMOS_HASH_MK.
+    
+    Returns:
+        Tuple com (cache_principal, cache_sinonimos)
+        Cada cache mapeia: hash -> (master_key_id, set_of_valid_materials)
     """
     try:
         df_base = pd.read_csv(CAMINHO_BASE_MESTRA, dtype=str, keep_default_na=False)
@@ -44,19 +100,24 @@ def carregar_base_mestra_cache() -> Tuple[Dict[str, str], Dict[str, str]]:
             print(f"ERRO: O arquivo {CAMINHO_BASE_MESTRA} deve conter as colunas 'HASH_CACHE' e 'MASTER_KEY_ID'.")
             return {}, {}
             
-        # cache = dict(zip(df_base['HASH_CACHE'], df_base['MASTER_KEY_ID']))
-        
         # Populando Cache Principal com Variacoes (Original e Normalizado)
         cache = {}
         # Garante que as colunas essenciais existem
         col_comp = 'COMPONENTE_ORIGINAL' if 'COMPONENTE_ORIGINAL' in df_base.columns else 'NOME_PREFERENCIAL_LOINC'
+        col_system = 'LOINC_SYSTEM' if 'LOINC_SYSTEM' in df_base.columns else None
         
         for _, row in df_base.iterrows():
             mk_id = row['MASTER_KEY_ID']
             hash_oficial = row['HASH_CACHE']
             
+            # Extrai materiais válidos do LOINC_SYSTEM
+            materiais_validos = set()
+            if col_system and row[col_system]:
+                materiais_str = str(row[col_system])
+                materiais_validos = {normalizar_material(m.strip()) for m in materiais_str.split(',') if m.strip()}
+            
             # Adiciona o hash oficial (vindo do CSV)
-            cache[hash_oficial] = mk_id
+            cache[hash_oficial] = (mk_id, materiais_validos)
             
             # Adiciona variacoes do componente original (Normalizado, Splits, etc)
             # Isso permite que se o input for "Ureia" e o original "Uréia", ambos gerem hashes conhecidos
@@ -66,7 +127,7 @@ def carregar_base_mestra_cache() -> Tuple[Dict[str, str], Dict[str, str]]:
             for var in variacoes:
                 h_var = gerar_hash_string(var)
                 if h_var not in cache:
-                    cache[h_var] = mk_id
+                    cache[h_var] = (mk_id, materiais_validos)
 
         # Processamento de Sinonimos
         synonym_cache = {}
@@ -87,7 +148,12 @@ def carregar_base_mestra_cache() -> Tuple[Dict[str, str], Dict[str, str]]:
                             for var_sin in variacoes_sin:
                                 h_sin = gerar_hash_string(var_sin)
                                 if h_sin not in synonym_cache:
-                                    synonym_cache[h_sin] = master_key
+                                    # Usa os mesmos materiais válidos da Master Key
+                                    materiais_mk = set()
+                                    if col_system and row[col_system]:
+                                        materiais_str = str(row[col_system])
+                                        materiais_mk = {normalizar_material(m.strip()) for m in materiais_str.split(',') if m.strip()}
+                                    synonym_cache[h_sin] = (master_key, materiais_mk)
 
         print(f"✅ Cache de Master Keys populado com {len(cache)} registros mestres.")
         print(f"✅ Cache de Sinonimos populado com {len(synonym_cache)} registros derivados.")
@@ -120,11 +186,20 @@ def normalizar_termo(termo: str) -> str:
 def normalizar_texto_completo(texto: str) -> str:
     """
     Remove acentuação, converte para minúsculas e remove espaços extras.
+    Também normaliza quebras de linha e outros caracteres de espaçamento.
     """
     if not texto: return ""
+    
+    # Primeiro, substitui quebras de linha e tabs por espaços
+    texto = re.sub(r'[\n\r\t]+', ' ', str(texto))
+    
     # Remove acentos
-    texto_sem_acento = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('ASCII')
-    return texto_sem_acento.lower().strip()
+    texto_sem_acento = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
+    
+    # Normaliza espaços múltiplos para um único espaço
+    texto_limpo = re.sub(r'\s+', ' ', texto_sem_acento)
+    
+    return texto_limpo.lower().strip()
 
 def gerar_hash_string(texto: str) -> str:
     """Gera o MD5 de uma string simples."""
@@ -182,8 +257,7 @@ def gerar_variacoes_pesquisa(texto: str) -> List[str]:
         'dosagem', 'quantificacao', 'determinacao', 'analise', 'confirmacao',
         'h.p.l.c', 'hplc', 'quimioluminescencia', 'eletroquimioluminescencia', 
         'imunoturbidimetria', 'nefelometria', 'colorimetrico', 'cinetico',
-        'elisa', 'enzimatico', 'por', 'soro', 'plasma', 'basal', 'total', 
-        'livre', 'indireta', 'direta', 'reverso', 'fracoes',
+        'elisa', 'enzimatico', 'por', 'soro', 'plasma', 'basal', 
         'hormonio', 'vitamina', 'de', 'e', 'para' # Stopwords comuns em nomes de exames
     ]
     
@@ -256,6 +330,7 @@ def gerar_hash_determinista(exame: Dict[str, Any]) -> str:
 def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Simula o workflow Cache -> Pinecone (Feedback Loop) para cada exame, gerando logs.
+    Agora considera a compatibilidade de material durante o matching.
     """
     global CACHE_PRODUCAO_HASH_MK
     global CACHE_SINONIMOS_HASH_MK
@@ -270,12 +345,13 @@ def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dic
         exame['hash_id'] = hash_inicial 
         
         procedimento_original = exame.get('procedimento', '')
+        material_exame = exame.get('material', '')
         
         # Log inicial
         log_entry = {
             'id_exame': i + 1,
             'procedimento': procedimento_original,
-            'material': exame.get('material'),
+            'material': material_exame,
             'hash_id_curto': hash_inicial[:8],
             'decisao': 'PENDING',
             'mk_atribuida': 'N/A',
@@ -285,6 +361,7 @@ def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dic
         match_encontrado = False
         mk_encontrada = ""
         motivo_match = ""
+        materiais_mk = set()
         
         # Gera lista de tentativas
         candidatos = gerar_variacoes_pesquisa(procedimento_original)
@@ -294,19 +371,53 @@ def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dic
             
             # 1. Check Base Mestra
             if hash_candidato in CACHE_PRODUCAO_HASH_MK:
-                mk_encontrada = CACHE_PRODUCAO_HASH_MK[hash_candidato]
-                motivo_match = f"MATCH DETERMINISTICO ({'ORIGINAL' if candidato == procedimento_original.strip() else 'NORMALIZADO/SPLIT'})"
-                match_encontrado = True
-                exame['hash_id'] = hash_candidato # Atualiza para o hash que deu match
-                break
+                mk_id, materiais_validos = CACHE_PRODUCAO_HASH_MK[hash_candidato]
+                
+                # Valida compatibilidade de material
+                if not materiais_validos or not material_exame:
+                    # Se não há restrição de material, aceita
+                    mk_encontrada = mk_id
+                    materiais_mk = materiais_validos
+                    motivo_match = f"MATCH DETERMINISTICO ({'ORIGINAL' if candidato == procedimento_original.strip().lower() else 'NORMALIZADO/SPLIT'})"
+                    match_encontrado = True
+                    exame['hash_id'] = hash_candidato
+                    break
+                else:
+                    # Verifica se o material do exame está na lista de materiais válidos
+                    material_norm = normalizar_material(material_exame)
+                    if material_norm in materiais_validos:
+                        mk_encontrada = mk_id
+                        materiais_mk = materiais_validos
+                        motivo_match = f"MATCH DETERMINISTICO ({'ORIGINAL' if candidato == procedimento_original.strip().lower() else 'NORMALIZADO/SPLIT'}) + MATERIAL OK"
+                        match_encontrado = True
+                        exame['hash_id'] = hash_candidato
+                        break
+                    # Se não é compatível, continua buscando
                 
             # 2. Check Sinonimos
             if hash_candidato in CACHE_SINONIMOS_HASH_MK:
-                mk_encontrada = CACHE_SINONIMOS_HASH_MK[hash_candidato]
-                motivo_match = f"MATCH SINONIMO ({'ORIGINAL' if candidato == procedimento_original.strip() else 'NORMALIZADO/SPLIT'})"
-                match_encontrado = True
-                exame['hash_id'] = hash_candidato
-                break
+                mk_id, materiais_validos = CACHE_SINONIMOS_HASH_MK[hash_candidato]
+                
+                # Valida compatibilidade de material
+                if not materiais_validos or not material_exame:
+                    # Se não há restrição de material, aceita
+                    mk_encontrada = mk_id
+                    materiais_mk = materiais_validos
+                    motivo_match = f"MATCH SINONIMO ({'ORIGINAL' if candidato == procedimento_original.strip().lower() else 'NORMALIZADO/SPLIT'})"
+                    match_encontrado = True
+                    exame['hash_id'] = hash_candidato
+                    break
+                else:
+                    # Verifica se o material do exame está na lista de materiais válidos
+                    material_norm = normalizar_material(material_exame)
+                    if material_norm in materiais_validos:
+                        mk_encontrada = mk_id
+                        materiais_mk = materiais_validos
+                        motivo_match = f"MATCH SINONIMO ({'ORIGINAL' if candidato == procedimento_original.strip().lower() else 'NORMALIZADO/SPLIT'}) + MATERIAL OK"
+                        match_encontrado = True
+                        exame['hash_id'] = hash_candidato
+                        break
+                    # Se não é compatível, continua buscando
         
         if match_encontrado:
              # CACHE HIT
@@ -322,6 +433,10 @@ def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dic
             })
             
         else:
+
+            print("materiais_validos", materiais_validos)
+            print("material_exame", material_exame)
+
             # CACHE MISS (Via Lenta: Consulta ao Pinecone)
             
             # Simula a atribuição da MK pelo Pinecone + Lógica de filtro + Aprendizado
@@ -342,6 +457,7 @@ def simular_processamento_hibrido(exames_data: List[Dict[str, Any]]) -> List[Dic
         LOG_EXAMES_DETALHADO.append(log_entry)
     
     return resultados
+
 
 # ==============================================================================
 # 3. CÁLCULO DAS MÉTRICAS DE PERFORMANCE
